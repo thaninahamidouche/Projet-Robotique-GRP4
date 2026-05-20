@@ -1,0 +1,204 @@
+#include <Servo.h>
+#include <NewPing.h>
+
+// === Capteurs ===
+#define TRIGGER_PIN 15
+#define ECHO_PIN 14
+#define MAX_DISTANCE 200
+NewPing sonar(TRIGGER_PIN, ECHO_PIN, MAX_DISTANCE);
+
+#define ir_R 30         // Capteur flamme droite
+#define ir_L 32         // Capteur flamme gauche
+#define MQ A0           // Capteur fumée
+
+// === Servo ===
+Servo myServo;
+Servo monServo;
+// === Moteurs ===
+#define ENA 7
+#define IN1 24
+#define IN2 10
+#define ENB 6
+#define IN3 12
+#define IN4 25
+
+// === Pompe (relais actif LOW) ===
+#define pump 28
+#define buzzer 44
+// === Seuil de fumée ===
+#define MQ_THRESHOLD 300
+
+void setup() {
+  Serial.begin(9600);
+
+  // Servo
+  myServo.attach(39);
+  myServo.write(90);
+  monServo.attach(33);
+  monServo.write(90);
+
+  // Broches moteur
+  pinMode(ENA, OUTPUT); pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(ENB, OUTPUT); pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+
+  // Capteurs
+  pinMode(ir_R, INPUT);
+  pinMode(ir_L, INPUT);
+  pinMode(MQ, INPUT);
+
+  // Pompe : relais actif LOW → HIGH = éteint
+  pinMode(pump, OUTPUT);
+  pinMode(buzzer, OUTPUT);
+  digitalWrite(pump, HIGH);
+  digitalWrite(buzzer, LOW);
+}
+
+void loop() {
+  int flameRight = digitalRead(ir_R);
+  int flameLeft = digitalRead(ir_L);
+  int smoke = analogRead(MQ);
+  int distFront = lireDistance(90);
+
+  Serial.print("Flammes R: "); Serial.print(flameRight);
+  Serial.print(" | Flammes L: "); Serial.print(flameLeft);
+  Serial.print(" | Fumée: "); Serial.print(smoke);
+  Serial.print(" | Distance: "); Serial.println(distFront);
+
+  bool fumeeDetectee = (smoke > MQ_THRESHOLD);
+
+ if (flameRight == LOW && fumeeDetectee) {
+    Serial.println("Flamme détectée à gauche !");
+    digitalWrite(buzzer, HIGH);
+    tournerGauche();
+    delay(500);
+    avancer();
+    delay(500);
+    stopMoteurs();
+    eteindreFeu();
+  }
+   else if (flameLeft == LOW && fumeeDetectee) {
+    Serial.println("Flamme détectée à droite !");
+    digitalWrite(buzzer, HIGH);
+    tournerDroite();
+    delay(500);
+    avancer();
+    delay(500);
+    stopMoteurs();
+    eteindreFeu();
+  }
+   else if (distFront <= 20) {
+    eviterObstacle();
+  } else {
+    digitalWrite(buzzer, LOW);
+    stopMoteurs();
+  }
+
+  delay(100); // Pause légère pour stabilité
+}
+
+// Mesure à un angle donné
+int lireDistance(int angle) {
+  myServo.write(angle);
+  delay(300);
+  int d = sonar.ping_cm();
+  if (d == 0) d = MAX_DISTANCE; // Aucun obstacle détecté
+  Serial.print("Angle ");
+  Serial.print(angle);
+  Serial.print("° -> ");
+  Serial.print(d);
+  Serial.println(" cm");
+  return d;
+}
+
+//extinction
+void eteindreFeu() {
+  Serial.println("Extinction du feu...");
+  digitalWrite(pump, LOW);  // Activer pompe
+
+  // Balayage gauche → droite
+  for (int angle = 60; angle <= 120; angle += 5) {
+    monServo.write(angle);
+    delay(100);
+  }
+
+  // Balayage droite → gauche
+  for (int angle = 120; angle >= 60; angle -= 5) {
+    monServo.write(angle);
+    delay(100);
+  }
+
+  digitalWrite(pump, HIGH); // Couper pompe
+  delay(1000);
+} 
+
+void eviterObstacle() {
+  Serial.println("Obstacle détecté !");
+  stopMoteurs();
+  delay(500);
+  reculer();         
+  delay(500);
+  stopMoteurs();
+  delay(200);
+
+  int distLeft = lireDistance(30);
+  delay(100);
+  int distRight = lireDistance(150);
+  delay(100);
+
+  if (distLeft > distRight && distLeft > 20) {
+    tournerGauche();
+    delay(500);
+    avancer();
+    delay(1000);
+  } else {
+    tournerDroite();
+    delay(500);
+    avancer();
+    delay(1000);
+  }
+}
+
+// Fonctions moteur
+void avancer() {
+  digitalWrite(ENA, 150);
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(ENB, 150);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+}
+
+void tournerGauche() {
+  digitalWrite(ENA, 150);
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(ENB, 0);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+}
+
+void tournerDroite() {
+  digitalWrite(ENA, 0);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(ENB, 150);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+}
+
+void stopMoteurs() {
+  digitalWrite(ENA, 0);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(ENB, 0);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+}
+void reculer() {
+  digitalWrite(ENA, 150);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(ENB, 150);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
