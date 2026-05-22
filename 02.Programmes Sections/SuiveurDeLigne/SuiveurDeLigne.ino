@@ -7,8 +7,6 @@
 MeRGBLineFollower LightSensorRGB_1(PORT_3);
 
 // -------- Moteurs --------
-// A = roue DROITE
-// B = roue GAUCHE
 #define MOTEUR_A 0x66
 #define MOTEUR_B 0x68
 
@@ -16,12 +14,13 @@ MeRGBLineFollower LightSensorRGB_1(PORT_3);
 #define AVANT   0x01
 #define ARRIERE 0x02
 
+// -------- Variable d'état --------
+int etat = 0;  // 0 = en attente, 1 = en route
+
 // -------- Pilotage bas niveau --------
 void piloterMoteur(byte adresse, byte direction, byte vitesse) {
     if (vitesse > 63) vitesse = 63;
-
     byte commande = (vitesse << 2) | direction;
-
     Wire.beginTransmission(adresse);
     Wire.write(0x00);
     Wire.write(commande);
@@ -30,40 +29,39 @@ void piloterMoteur(byte adresse, byte direction, byte vitesse) {
 
 // -------- Déplacements --------
 void toutDroit() {
-    // A (droite)
-    piloterMoteur(MOTEUR_A, AVANT, 36);
-
-    // B (gauche)
-    piloterMoteur(MOTEUR_B, ARRIERE, 36);
+    piloterMoteur(MOTEUR_A, AVANT, 50);
+    piloterMoteur(MOTEUR_B, ARRIERE, 50);
     Serial.println("TOUT DROIT.");
-    //delay(5000);
 }
 
 void tournerDroite() {
-    // ralentir roue droite (A)
-    piloterMoteur(MOTEUR_A, AVANT, 5);
+    piloterMoteur(MOTEUR_A, AVANT, 17);
+    piloterMoteur(MOTEUR_B, ARRIERE, 50);
+    Serial.println("DROITE FORT.");
+}
 
-    // roue gauche plus rapide (B)
-    piloterMoteur(MOTEUR_B, ARRIERE, 40);
-    Serial.println(" DROITE.");
-    //delay(5000);
+void tournerDroiteL() {
+    piloterMoteur(MOTEUR_A, AVANT, 45);
+    piloterMoteur(MOTEUR_B, ARRIERE, 50);
+    Serial.println("DROITE LEGER.");
 }
 
 void tournerGauche() {
-    // roue droite plus rapide (A)
-    piloterMoteur(MOTEUR_A, AVANT, 40);
+    piloterMoteur(MOTEUR_A, AVANT, 50);
+    piloterMoteur(MOTEUR_B, ARRIERE, 17);
+    Serial.println("GAUCHE FORT.");
+}
 
-    // ralentir roue gauche (B)
-    piloterMoteur(MOTEUR_B, ARRIERE, 5);
-    Serial.println(" GAUCHE.");
-    //delay(5000);
+void tournerGaucheL() {
+    piloterMoteur(MOTEUR_A, AVANT, 50);
+    piloterMoteur(MOTEUR_B, ARRIERE, 45);
+    Serial.println("GAUCHE LEGER.");
 }
 
 void arreter() {
     piloterMoteur(MOTEUR_A, ARRET, 0);
     piloterMoteur(MOTEUR_B, ARRET, 0);
-    Serial.println(" ARRET.");
-    //delay(5000);
+    Serial.println("ARRET.");
 }
 
 // -------- Setup --------
@@ -81,24 +79,40 @@ void loop() {
 
     Serial.println(pos, BIN);
 
-    if (pos == 0b1001) {
-        toutDroit();
+    // -------- Gestion ligne de départ/arrivée --------
+    if (pos == 0b0000) {
+        if (etat == 0) {
+            Serial.println("DEPART !");
+            etat = 1;
+            toutDroit();  // on passe la ligne et on continue
+        }
+        else if (etat == 1) {
+            Serial.println("ARRIVEE !");
+            arreter();
+        }
     }
-    else if (pos == 0b1011 || pos == 0b0111 || pos == 0b1000 || pos == 0b1100) {
-        // ligne à droite
-        tournerDroite();
-    }
-    else if (pos == 0b1101 || pos == 0b1110 || pos == 0b0001 || pos == 0b0011) {
-        // ligne à gauche
-        tournerGauche();
-    }
-    else if (pos == 0b1111) {
-        arreter();
-    }
-    else {
-        toutDroit();
+
+    // -------- Suivi de ligne (seulement si en route) --------
+    else if (etat == 1) {
+        if (pos == 0b1001) {
+            toutDroit();
+        }
+        else if (pos == 0b0111 || pos == 0b1000) {
+            tournerDroite();
+        }
+        else if (pos == 0b1011 || pos == 0b1100) {
+            tournerDroiteL();
+        }
+        else if (pos == 0b1110 || pos == 0b0001) {
+            tournerGauche();
+        }
+        else if (pos == 0b1101 || pos == 0b0011) {
+            tournerGaucheL();
+        }
+        else {
+            toutDroit();
+        }
     }
 
     delay(20);
 }
-// test de connexion github
