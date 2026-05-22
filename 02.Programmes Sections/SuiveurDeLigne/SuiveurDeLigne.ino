@@ -84,11 +84,11 @@ void loop() {
     if (pos == 0b1001) {
         toutDroit();
     }
-    else if (pos == 0b1011 || pos == 0b0111) {
+    else if (pos == 0b1011 || pos == 0b0111 || pos == 0b1000 || pos == 0b1100) {
         // ligne à droite
         tournerDroite();
     }
-    else if (pos == 0b1101 || pos == 0b1110) {
+    else if (pos == 0b1101 || pos == 0b1110 || pos == 0b0001 || pos == 0b0011) {
         // ligne à gauche
         tournerGauche();
     }
