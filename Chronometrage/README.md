@@ -4,7 +4,7 @@
 
 Dans le cadre du projet robotique, j'ai conçu et réalisé un circuit de chronométrage permettant de mesurer automatiquement le temps de passage du robot entre deux barrières de détection.
 
-Le circuit est basé sur des composants logiques et permet d'afficher le temps mesuré sur des afficheurs 7 segments.
+Le circuit est basé sur des composants logiques et permet d'afficher le temps mesuré sur deux afficheurs 7 segments.
 
 
 ## Objectif
@@ -13,7 +13,7 @@ L'objectif du projet est de :
 
 - Déclencher automatiquement le chronomètre lors du passage du robot devant la première barrière.
 - Arrêter automatiquement le comptage à la seconde barrière.
-- Afficher le temps mesuré sur des afficheurs 7 segments.
+- Afficher le temps mesuré sur deux afficheurs 7 segments.
 - Concevoir une carte électronique fonctionnelle sous KiCad.
 
 
