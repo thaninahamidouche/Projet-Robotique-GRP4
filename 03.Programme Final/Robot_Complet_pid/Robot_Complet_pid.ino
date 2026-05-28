@@ -171,7 +171,7 @@ void activerMoteurFin() {
 // ============================================================
 bool tunnelFait    = false;
 bool tunnelDetecte = false;
-const unsigned long TEMPS_AVANT_TUNNEL = 700;
+const unsigned long TEMPS_AVANT_TUNNEL = 1500;
 
 void suiveurL1(uint8_t pos) {
   switch (pos) {
@@ -214,8 +214,8 @@ void suiveurL1(uint8_t pos) {
 bool arreterSur0000 = false;
 
 // Paramètres PID - ajuster sur le terrain
-float Kp = 8.0;           // baisser si oscillations (ex: 5.0)
-float Kd = 3.0;           // augmenter pour amortir (ex: 5.0)
+float Kp = 4.0;           // baisser si oscillations (ex: 5.0)
+float Kd = 2.0;           // augmenter pour amortir (ex: 5.0)
 const int VITESSE_BASE = 28;
 
 float erreurPrecedente = 0;
@@ -381,8 +381,8 @@ void esquiveObstacleGauche() {
   unsigned long timer = 0; bool perdu = false;
   while (!perdu) {
     float d = mesurerDistance();
-    if      (d < 20)           { piloterMoteur(MOTEUR_A, AVANT, 30); piloterMoteur(MOTEUR_B, ARRIERE, 20); }
-    else if (d > 20 && d < 30) { piloterMoteur(MOTEUR_A, AVANT, 20); piloterMoteur(MOTEUR_B, ARRIERE, 30); }
+    if      (d < 22)           { piloterMoteur(MOTEUR_A, AVANT, 30); piloterMoteur(MOTEUR_B, ARRIERE, 20); }
+    else if (d > 22 && d < 30) { piloterMoteur(MOTEUR_A, AVANT, 20); piloterMoteur(MOTEUR_B, ARRIERE, 30); }
     else if (d >= 40) { if (!timer) timer = millis(); if (millis()-timer > 400) perdu = true; avancer(25); }
     else { avancer(25); timer = 0; }
     delay(30);
