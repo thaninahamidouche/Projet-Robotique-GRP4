@@ -1,0 +1,740 @@
+// ============================================================
+//  ROBOT COMPLET - Machine d'états
+// ============================================================
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <MeOrion.h>
+#include "MeRGBLineFollower.h"
+#include <Adafruit_NeoPixel.h>
+#include "utility/Servo.h"
+#include "rgb_lcd.h"
+
+// ============================================================
+// LCD
+// ============================================================
+rgb_lcd lcd;
+
+void afficherLCD(const char* ligne1, const char* ligne2 = "") {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(ligne1);
+  if (ligne2[0] != '\0') {
+    lcd.setCursor(0, 1);
+    lcd.print(ligne2);
+  }
+}
+
+// ============================================================
+// MACHINE D'ETATS
+// ============================================================
+enum EtatRobot {
+  ATTENTE_DEPART,
+  DEPART_V1,
+  SUIVI_L1,
+  TUNNEL,
+  RECUP_L2,
+  SUIVI_L2,
+  EVITEMENT_O1,
+  SUIVI_L3,
+  EVITEMENT_O2,
+  SUIVI_RAMPE,
+  DETECTION_COULEUR,
+  AFFICHAGE_LEDS,
+  DEMI_TOUR,
+  SUIVI_RETOUR,
+  FIN_PARCOURS
+};
+EtatRobot etat = ATTENTE_DEPART;
+
+// ============================================================
+// CAPTEURS
+// ============================================================
+MeRGBLineFollower LightSensorRGB_1(PORT_3);
+
+Servo radar;
+const int PIN_SERVO        = A0;
+const int ANGLE_CENTRE     = 95;
+const int ANGLE_GAUCHE_TUN = 180;
+const int ANGLE_DROITE_O1  = 5;
+const int ANGLE_GAUCHE_O2  = 180;
+
+const int sigPin = 7;
+
+#define LED_PIN  6
+#define NB_LEDS  30
+Adafruit_NeoPixel strip(NB_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+#define COLOR_ADDR 0x29
+
+// ============================================================
+// MOTEURS
+// ============================================================
+#define MOTEUR_A 0x66
+#define MOTEUR_B 0x68
+#define ARRET    0x00
+#define AVANT    0x01
+#define ARRIERE  0x02
+
+void piloterMoteur(byte adresse, byte direction, byte vitesse) {
+  vitesse = constrain(vitesse, 0, 63);
+  byte commande = (vitesse << 2) | direction;
+  Wire.beginTransmission(adresse);
+  Wire.write(0x00);
+  Wire.write(commande);
+  Wire.endTransmission();
+}
+
+// ============================================================
+// MOUVEMENTS DE BASE
+// ============================================================
+void avancer(int v)              { piloterMoteur(MOTEUR_A, AVANT,    v);  piloterMoteur(MOTEUR_B, ARRIERE, v); }
+void tournerGauche(int v)        { piloterMoteur(MOTEUR_A, AVANT,    v);  piloterMoteur(MOTEUR_B, ARRIERE, v/3); }
+void tournerDroite(int v)        { piloterMoteur(MOTEUR_A, AVANT,    v/3);piloterMoteur(MOTEUR_B, ARRIERE, v); }
+void toutDroitRetour() { piloterMoteur(MOTEUR_A, AVANT, 20); piloterMoteur(MOTEUR_B, ARRIERE, 20); }
+void arreter()                   { piloterMoteur(MOTEUR_A, ARRET,    0);  piloterMoteur(MOTEUR_B, ARRET,   0); }
+void tournerGaucheSurPlace(int v){ piloterMoteur(MOTEUR_A, AVANT,    v);  piloterMoteur(MOTEUR_B, AVANT,   v); }
+void tournerDroiteSurPlace(int v){ piloterMoteur(MOTEUR_A, ARRIERE,  v);  piloterMoteur(MOTEUR_B, ARRIERE, v); }
+void rotationGauche()            { piloterMoteur(MOTEUR_A, AVANT,   35);  piloterMoteur(MOTEUR_B, AVANT,  35); }
+void chercherLigneGauche()       { piloterMoteur(MOTEUR_A, AVANT,   25);  piloterMoteur(MOTEUR_B, AVANT,  15); }
+void avancerTunnel(int vd,int vg){ piloterMoteur(MOTEUR_A, AVANT, constrain(vd,0,63)); piloterMoteur(MOTEUR_B, ARRIERE, constrain(vg,0,63)); }
+
+// Vitesses exactes de SuiveurDeLigneVFF.ino
+void toutDroit()          { piloterMoteur(MOTEUR_A, AVANT, 35); piloterMoteur(MOTEUR_B, ARRIERE, 35); }
+void tournerDroiteLeger() { piloterMoteur(MOTEUR_A, AVANT, 15); piloterMoteur(MOTEUR_B, ARRIERE, 40); }
+void tournerDroiteFort()  { piloterMoteur(MOTEUR_A, AVANT,  5); piloterMoteur(MOTEUR_B, ARRIERE, 45); }
+void tournerGaucheLeger() { piloterMoteur(MOTEUR_A, AVANT, 36); piloterMoteur(MOTEUR_B, ARRIERE, 10); }
+void tournerGaucheFort()  { piloterMoteur(MOTEUR_A, AVANT, 45); piloterMoteur(MOTEUR_B, ARRIERE,  5); }
+
+// ============================================================
+// ULTRASON
+// ============================================================
+float mesurerDistance() {
+  pinMode(sigPin, OUTPUT);
+  digitalWrite(sigPin, LOW);  delayMicroseconds(2);
+  digitalWrite(sigPin, HIGH); delayMicroseconds(10);
+  digitalWrite(sigPin, LOW);
+  pinMode(sigPin, INPUT);
+  long duree = pulseIn(sigPin, HIGH, 30000);
+  if (duree == 0) return 400;
+  return duree * 0.034 / 2.0;
+}
+
+long derniereDistanceTunnel = 999;
+bool murDejaVu = false;
+
+long distanceFiltreeTunnel() {
+  long somme = 0; int n = 0;
+  for (int i = 0; i < 3; i++) {
+    long d = (long)mesurerDistance();
+    if (d != 999 && d > 2 && d < 120) { somme += d; n++; }
+    delay(5);
+  }
+  if (n == 0) return murDejaVu ? derniereDistanceTunnel : 999;
+  derniereDistanceTunnel = somme / n;
+  murDejaVu = true;
+  return derniereDistanceTunnel;
+}
+
+// ============================================================
+// CAPTEUR LIGNE
+// ============================================================
+uint8_t lireLigne() {
+  LightSensorRGB_1.updataAllSensorValue();
+  return LightSensorRGB_1.getPositionState();
+}
+
+bool ligneVue(uint8_t pos) {
+  return pos == 0b1001 || pos == 0b1011 || pos == 0b0111 ||
+         pos == 0b1101 || pos == 0b1110 || pos == 0b0000;
+}
+
+bool ligneCentree(uint8_t pos) {
+  return pos == 0b1001;
+}
+
+// ============================================================
+// VARIABLES COMMUNES
+// ============================================================
+int           derniereDirection = 0;
+unsigned long debutNoir         = 0;
+unsigned long debutBlanc        = 0;
+
+void resetNoir()  { debutNoir  = 0; }
+void resetBlanc() { debutBlanc = 0; }
+
+void recupererLigne() {
+  if      (derniereDirection ==  1) tournerDroiteFort();
+  else if (derniereDirection == -1) tournerGaucheFort();
+  else avancer(20);
+}
+
+void activerMoteurFin() {
+  piloterMoteur(0x65, ARRIERE, 63);
+}
+
+// ============================================================
+// DEPART V1 - depuis boncode.ino (inchangé)
+// ============================================================
+unsigned long debutVirageDepart = 0;
+const unsigned long TEMPS_AVANCE_DEPART = 180;
+const unsigned long TEMPS_VIRAGE_DEPART = 300;
+const int V_DEPART = 22;
+
+void faireDepartV1() {
+  unsigned long t = millis() - debutVirageDepart;
+  if (t < TEMPS_AVANCE_DEPART) {
+    avancer(V_DEPART);
+    return;
+  }
+  if (t < TEMPS_AVANCE_DEPART + TEMPS_VIRAGE_DEPART) {
+    piloterMoteur(MOTEUR_A, AVANT,  8);
+    piloterMoteur(MOTEUR_B, ARRIERE, 30);
+    return;
+  }
+  resetNoir(); resetBlanc();
+  derniereDirection = 1;
+  etat = SUIVI_L1;
+}
+
+// ============================================================
+// SUIVEUR L1 - depuis boncode.ino (inchangé)
+// ============================================================
+bool tunnelFait    = false;
+bool tunnelDetecte = false;
+const unsigned long TEMPS_AVANT_TUNNEL = 700;
+
+void suiveurL1(uint8_t pos) {
+  switch (pos) {
+    case 0b1001: resetNoir(); resetBlanc(); toutDroit();          derniereDirection =  0; break;
+    case 0b1011: resetNoir(); resetBlanc(); tournerDroiteLeger(); derniereDirection =  1; break;
+    case 0b0111: resetNoir(); resetBlanc(); tournerDroiteFort();  derniereDirection =  1; break;
+    case 0b1101: resetNoir(); resetBlanc(); tournerGaucheLeger(); derniereDirection = -1; break;
+    case 0b1110: resetNoir(); resetBlanc(); tournerGaucheFort();  derniereDirection = -1; break;
+    case 0b0001:
+    case 0b1000: resetNoir(); resetBlanc(); toutDroit(); derniereDirection = 0; break;
+    case 0b0011: resetNoir(); resetBlanc(); tournerDroiteFort(); derniereDirection =  1; break;
+    case 0b1100: resetNoir(); resetBlanc(); tournerGaucheFort(); derniereDirection = -1; break;
+    case 0b0101:
+    case 0b1010:
+    case 0b0110: resetNoir(); resetBlanc(); toutDroit(); break;
+    case 0b0000:
+      resetBlanc();
+      toutDroit(); derniereDirection = 0;
+      if (debutNoir == 0) debutNoir = millis();
+      break;
+    case 0b1111:
+      resetNoir();
+      if (debutBlanc == 0) debutBlanc = millis();
+      if (millis() - debutBlanc < TEMPS_AVANT_TUNNEL) {
+        recupererLigne();
+      } else {
+        if (!tunnelFait) tunnelDetecte = true;
+        else recupererLigne();
+      }
+      break;
+    default: resetNoir(); resetBlanc(); toutDroit(); break;
+  }
+}
+
+// ============================================================
+// SUIVEUR VFF - pour SUIVI_L2, SUIVI_L3, SUIVI_RAMPE
+// 1111 = récupération simple, 0000 = continue
+// ============================================================
+void suiveurVFF(uint8_t pos) {
+  switch (pos) {
+    case 0b1001: resetNoir(); toutDroit();          derniereDirection =  0; break;
+    case 0b1011: resetNoir(); tournerDroiteLeger(); derniereDirection =  1; break;
+    case 0b0111: resetNoir(); tournerDroiteFort();  derniereDirection =  1; break;
+    case 0b1101: resetNoir(); tournerGaucheLeger(); derniereDirection = -1; break;
+    case 0b1110: resetNoir(); tournerGaucheFort();  derniereDirection = -1; break;
+    case 0b0001:
+    case 0b1000: resetNoir(); toutDroit(); derniereDirection = 0; break;
+    case 0b0011: resetNoir(); tournerDroiteFort(); derniereDirection =  1; break;
+    case 0b1100: resetNoir(); tournerGaucheFort(); derniereDirection = -1; break;
+    case 0b0101:
+    case 0b1010:
+    case 0b0110: resetNoir(); toutDroit(); break;
+    case 0b0000:
+      resetNoir(); toutDroit(); derniereDirection = 0;
+      break;
+    case 0b1111:
+      resetNoir(); recupererLigne();
+      break;
+    default: resetNoir(); toutDroit(); break;
+  }
+}
+
+// ============================================================
+// SUIVEUR RETOUR - pour SUIVI_RETOUR uniquement
+// 0000 = arrêt immédiat -> FIN_PARCOURS
+// ============================================================
+void suiveurRetour(uint8_t pos) {
+  switch (pos) {
+    case 0b1001: resetNoir(); toutDroitRetour();          derniereDirection =  0; break;
+    case 0b1011: resetNoir(); tournerDroiteLeger(); derniereDirection =  1; break;
+    case 0b0111: resetNoir(); tournerDroiteFort();  derniereDirection =  1; break;
+    case 0b1101: resetNoir(); tournerGaucheLeger(); derniereDirection = -1; break;
+    case 0b1110: resetNoir(); tournerGaucheFort();  derniereDirection = -1; break;
+    case 0b0001:
+    case 0b1000: resetNoir(); toutDroitRetour(); derniereDirection = 0; break;
+    case 0b0011: resetNoir(); tournerDroiteFort(); derniereDirection =  1; break;
+    case 0b1100: resetNoir(); tournerGaucheFort(); derniereDirection = -1; break;
+    case 0b0101:
+    case 0b1010:
+    case 0b0110: resetNoir(); toutDroitRetour(); break;
+    case 0b0000:
+      // arrêt immédiat sur ligne noire de fin
+      arreter();
+      etat = FIN_PARCOURS;
+      break;
+    case 0b1111:
+      resetNoir(); recupererLigne();
+      break;
+    default: resetNoir(); toutDroit(); break;
+  }
+}
+
+// ============================================================
+// TUNNEL - depuis boncode.ino (inchangé)
+// ============================================================
+unsigned long debutTunnel = 0;
+unsigned long debutRecup  = 0;
+
+const int V_TUNNEL           = 20;
+const int CIBLE_GAUCHE       = 24;
+const int MARGE              = 2;
+const int DIST_TROP_PRES     = 21;
+const int DIST_TROP_LOIN     = 26;
+const int DIST_DANGER_GAUCHE = 18;
+const unsigned long TEMPS_SECURITE_ENTREE = 500;
+
+void entrerTunnel() {
+  arreter(); delay(300);
+  radar.write(ANGLE_GAUCHE_TUN); delay(600);
+  murDejaVu = false; derniereDistanceTunnel = 999;
+  debutTunnel = millis();
+  resetNoir(); resetBlanc();
+  etat = TUNNEL;
+}
+
+void suivreMurGauche() {
+  long d = distanceFiltreeTunnel();
+
+  if (d != 999 && d < DIST_DANGER_GAUCHE) { avancerTunnel(8, 30); return; }
+
+  if (millis() - debutTunnel < TEMPS_SECURITE_ENTREE) {
+    if (d == 999)           { avancerTunnel(10, 10); return; }
+    if (d < DIST_TROP_PRES) { avancerTunnel(9,  28); return; }
+    if (d > DIST_TROP_LOIN) { avancerTunnel(24, 10); return; }
+  }
+  if (d == 999)             { avancerTunnel(10, 10); return; }
+  if (d < DIST_TROP_PRES)   { avancerTunnel(9,  28); return; }
+  if (d > DIST_TROP_LOIN)   { avancerTunnel(24, 10); return; }
+
+  int erreur = d - CIBLE_GAUCHE;
+  if (abs(erreur) <= MARGE) { avancerTunnel(V_TUNNEL, V_TUNNEL); return; }
+  int correction = constrain((int)(erreur * 0.9), -8, 8);
+  avancerTunnel(constrain(V_TUNNEL + correction, 8, 26),
+                constrain(V_TUNNEL - correction, 8, 30));
+}
+
+void gererTunnel() {
+  uint8_t pos = lireLigne();
+  if (millis() - debutTunnel > 1800 && ligneVue(pos)) {
+    arreter(); delay(150);
+    radar.write(ANGLE_CENTRE); delay(250);
+    tunnelFait = true;
+    resetNoir(); resetBlanc();
+    debutRecup = millis();
+    etat = RECUP_L2;
+  } else {
+    suivreMurGauche();
+  }
+}
+
+// ============================================================
+// RECUPERATION LIGNE APRES ESQUIVE
+// ============================================================
+void revenirSurLigne() {
+  radar.write(ANGLE_CENTRE); delay(200);
+  piloterMoteur(MOTEUR_A, AVANT, 40); piloterMoteur(MOTEUR_B, AVANT, 40); delay(400);
+  piloterMoteur(MOTEUR_A, AVANT, 30); piloterMoteur(MOTEUR_B, AVANT, 30);
+  unsigned long t = millis();
+  while (true) {
+    uint8_t pos = lireLigne();
+    if (pos != 0b1111) break;
+    if (millis() - t > 2000) break;
+  }
+  t = millis();
+  while (true) {
+    uint8_t pos = lireLigne();
+    if (pos == 0b1001) break;
+    else if (pos == 0b1101 || pos == 0b1110) tournerGauche(25);
+    else if (pos == 0b1011 || pos == 0b0111) tournerDroite(25);
+    else { piloterMoteur(MOTEUR_A, AVANT, 25); piloterMoteur(MOTEUR_B, AVANT, 25); }
+    if (millis() - t > 3000) break;
+  }
+  arreter(); delay(150);
+}
+
+// ============================================================
+// EVITEMENT O1 : PAR LA GAUCHE (inchangé)
+// ============================================================
+void esquiveObstacleGauche() {
+  arreter(); delay(300);
+  tournerGaucheSurPlace(50); delay(700); arreter();
+  radar.write(ANGLE_DROITE_O1); delay(300);
+
+  while (true) { float d = mesurerDistance(); if (d > 0 && d < 35) break; avancer(25); delay(30); }
+
+  unsigned long timer = 0; bool perdu = false;
+  while (!perdu) {
+    float d = mesurerDistance();
+    if      (d < 20)           { piloterMoteur(MOTEUR_A, AVANT, 30); piloterMoteur(MOTEUR_B, ARRIERE, 20); }
+    else if (d > 20 && d < 30) { piloterMoteur(MOTEUR_A, AVANT, 20); piloterMoteur(MOTEUR_B, ARRIERE, 30); }
+    else if (d >= 40) { if (!timer) timer = millis(); if (millis()-timer > 400) perdu = true; avancer(25); }
+    else { avancer(25); timer = 0; }
+    delay(30);
+  }
+  avancer(25); delay(1300); arreter();
+  tournerDroiteSurPlace(45); delay(700); arreter();
+
+  while (true) { float d = mesurerDistance(); if (d > 0 && d < 35) break; avancer(25); delay(30); }
+
+  timer = 0; perdu = false;
+  while (!perdu) {
+    float d = mesurerDistance();
+    if      (d < 16)           { piloterMoteur(MOTEUR_A, AVANT, 30); piloterMoteur(MOTEUR_B, ARRIERE, 20); }
+    else if (d > 16 && d < 40) { piloterMoteur(MOTEUR_A, AVANT, 20); piloterMoteur(MOTEUR_B, ARRIERE, 30); }
+    else if (d >= 40) { if (!timer) timer = millis(); if (millis()-timer > 400) perdu = true; avancer(25); }
+    else { avancer(25); timer = 0; }
+    delay(30);
+  }
+  avancer(25); delay(1200); arreter();
+  tournerDroiteSurPlace(45); delay(500); arreter();
+
+  while (true) {
+    float d = mesurerDistance(); uint8_t pos = lireLigne();
+    if (pos != 0b1111) break;
+    if (d > 0 && d < 35) break;
+    avancer(25); delay(30);
+  }
+  bool ligneTrouvee = false;
+  while (!ligneTrouvee) {
+    float d = mesurerDistance(); uint8_t pos = lireLigne();
+    if (pos != 0b1111) { ligneTrouvee = true; break; }
+    if      (d < 18)           { piloterMoteur(MOTEUR_A, AVANT, 30); piloterMoteur(MOTEUR_B, ARRIERE, 20); }
+    else if (d > 18 && d < 40) { piloterMoteur(MOTEUR_A, AVANT, 20); piloterMoteur(MOTEUR_B, ARRIERE, 40); }
+    else                       { piloterMoteur(MOTEUR_A, AVANT, 20); piloterMoteur(MOTEUR_B, ARRIERE, 35); }
+    delay(20);
+  }
+  revenirSurLigne();
+}
+
+// ============================================================
+// EVITEMENT O2 : PAR LA DROITE (inchangé)
+// ============================================================
+void esquiveObstacleDroite() {
+  arreter(); delay(300);
+  tournerDroiteSurPlace(45); delay(700); arreter();
+  radar.write(ANGLE_GAUCHE_O2); delay(300);
+
+  while (true) { float d = mesurerDistance(); if (d > 0 && d < 35) break; avancer(25); delay(30); }
+
+  unsigned long timer = 0; bool perdu = false;
+  while (!perdu) {
+    float d = mesurerDistance();
+    if      (d < 20)           { piloterMoteur(MOTEUR_A, AVANT, 20); piloterMoteur(MOTEUR_B, ARRIERE, 30); }
+    else if (d > 20 && d < 30) { piloterMoteur(MOTEUR_A, AVANT, 30); piloterMoteur(MOTEUR_B, ARRIERE, 20); }
+    else if (d >= 40) { if (!timer) timer = millis(); if (millis()-timer > 400) perdu = true; avancer(25); }
+    else { avancer(25); timer = 0; }
+    delay(30);
+  }
+  avancer(25); delay(1200); arreter();
+  tournerGaucheSurPlace(45); delay(900); arreter();
+
+  while (true) { float d = mesurerDistance(); if (d > 0 && d < 35) break; avancer(25); delay(30); }
+
+  timer = 0; bool murPerdu = false;
+  while (!murPerdu) {
+    float d = mesurerDistance();
+    if      (d < 20)           { piloterMoteur(MOTEUR_A, AVANT, 20); piloterMoteur(MOTEUR_B, ARRIERE, 30); timer = 0; }
+    else if (d > 20 && d < 40) { piloterMoteur(MOTEUR_A, AVANT, 30); piloterMoteur(MOTEUR_B, ARRIERE, 20); timer = 0; }
+    else if (d >= 40)          { if (!timer) timer = millis(); if (millis()-timer > 400) murPerdu = true;
+                                  piloterMoteur(MOTEUR_A, AVANT, 30); piloterMoteur(MOTEUR_B, ARRIERE, 27); }
+    delay(20);
+  }
+
+  while (true) {
+    piloterMoteur(MOTEUR_A, AVANT, 45); piloterMoteur(MOTEUR_B, ARRIERE, 27);
+    uint8_t pos = lireLigne();
+    if (pos != 0b1111) break;
+    delay(20);
+  }
+  arreter(); delay(100);
+  radar.write(ANGLE_CENTRE); delay(200);
+}
+
+// ============================================================
+// DEMI-TOUR (inchangé)
+// ============================================================
+void reculer() {
+  unsigned long debut = millis();
+  while (millis() - debut < 1200) {
+    uint8_t pos = lireLigne();
+    if      (pos == 0b1001 || pos == 0b0000) { piloterMoteur(MOTEUR_A, ARRIERE, 30); piloterMoteur(MOTEUR_B, AVANT, 30); }
+    else if (pos == 0b1011 || pos == 0b0111) { piloterMoteur(MOTEUR_A, ARRIERE, 20); piloterMoteur(MOTEUR_B, AVANT, 35); }
+    else if (pos == 0b1101 || pos == 0b1110) { piloterMoteur(MOTEUR_A, ARRIERE, 35); piloterMoteur(MOTEUR_B, AVANT, 20); }
+    else                                      { piloterMoteur(MOTEUR_A, ARRIERE, 25); piloterMoteur(MOTEUR_B, AVANT, 25); }
+    delay(30);
+  }
+  arreter(); delay(150);
+}
+
+void faireDemiTour() {
+  arreter(); delay(300);
+  reculer();
+  rotationGauche(); delay(800);
+  arreter(); delay(100);
+  rotationGauche(); delay(600);
+  while (true) {
+    uint8_t pos = lireLigne();
+    if (ligneVue(pos)) { arreter(); delay(100); return; }
+    chercherLigneGauche();
+    delay(30);
+  }
+}
+
+// ============================================================
+// CAPTEUR COULEUR (inchangé)
+// ============================================================
+void writeColorRegister(byte reg, byte value) {
+  Wire.beginTransmission(COLOR_ADDR);
+  Wire.write(0x80 | reg); Wire.write(value);
+  Wire.endTransmission();
+}
+
+uint16_t readColorRegister16(byte reg) {
+  Wire.beginTransmission(COLOR_ADDR);
+  Wire.write(0x80 | reg); Wire.endTransmission();
+  Wire.requestFrom(COLOR_ADDR, 2);
+  if (Wire.available() < 2) return 0;
+  uint16_t low = Wire.read(); uint16_t high = Wire.read();
+  return (high << 8) | low;
+}
+
+void initColorSensor() {
+  writeColorRegister(0x00, 0x03);
+  writeColorRegister(0x01, 0xEB);
+  writeColorRegister(0x0F, 0x01);
+  delay(100);
+}
+
+uint32_t couleurDetectee = 0;
+const char* nomCouleur   = "";
+
+void lireCouleur() {
+  uint16_t red   = readColorRegister16(0x16);
+  uint16_t green = readColorRegister16(0x18);
+  uint16_t blue  = readColorRegister16(0x1A);
+  if      (red > green && red > blue)   { nomCouleur = "ROUGE"; couleurDetectee = strip.Color(255, 0,   0); }
+  else if (green > red && green > blue) { nomCouleur = "VERT";  couleurDetectee = strip.Color(0,   255, 0); }
+  else if (blue > red && blue > green)  { nomCouleur = "BLEU";  couleurDetectee = strip.Color(0,   0, 255); }
+  else                                  { nomCouleur = "?";     couleurDetectee = strip.Color(255,255,255); }
+}
+
+void afficherRuban(uint32_t couleur) {
+  for (int cycle = 0; cycle < 3; cycle++) {
+    for (int i = 0; i < NB_LEDS; i++) strip.setPixelColor(i, couleur);
+    strip.show(); delay(500);
+    strip.clear(); strip.show(); delay(500);
+  }
+}
+
+// ============================================================
+// VARIABLES OBSTACLES
+// ============================================================
+int obstaclesTraites         = 0;
+int SEUIL_DETECTION_OBSTACLE = 20;
+
+// ============================================================
+// SETUP
+// ============================================================
+void setup() {
+  Serial.begin(9600);
+  Wire.begin();
+
+  lcd.begin(16, 2);
+  lcd.setRGB(0, 255, 0);
+  afficherLCD("ROBOT PRET", "Attente depart");
+
+  LightSensorRGB_1.begin();
+  initColorSensor();
+
+  radar.attach(PIN_SERVO);
+  radar.write(ANGLE_CENTRE);
+  delay(500);
+
+  strip.begin(); strip.clear(); strip.show();
+  arreter();
+  delay(1000);
+}
+
+// ============================================================
+// LOOP - MACHINE D'ETATS
+// ============================================================
+void loop() {
+  uint8_t pos = lireLigne();
+
+  switch (etat) {
+
+    case ATTENTE_DEPART:
+      arreter();
+      if (ligneVue(pos)) {
+        resetNoir(); resetBlanc(); derniereDirection = 1;
+        debutVirageDepart = millis();
+        afficherLCD("DEPART", "Virage V1...");
+        etat = DEPART_V1;
+      }
+      break;
+
+    case DEPART_V1:
+      faireDepartV1();
+      delay(20);
+      break;
+
+    case SUIVI_L1:
+      tunnelDetecte = false;
+      suiveurL1(pos);
+      if (tunnelDetecte) {
+        afficherLCD("TUNNEL", "En cours...");
+        entrerTunnel();
+      }
+      delay(20);
+      break;
+
+    case TUNNEL:
+      gererTunnel();
+      delay(20);
+      break;
+
+    case RECUP_L2:
+      if (ligneVue(pos)) {
+        suiveurL1(pos);
+        if (ligneCentree(pos)) {
+          resetNoir(); resetBlanc();
+          afficherLCD("SUIVI L2", "Vers obstacle 1");
+          etat = SUIVI_L2;
+        }
+      } else {
+        recupererLigne();
+      }
+      delay(20);
+      break;
+
+    case SUIVI_L2:
+    {
+      float d = mesurerDistance();
+      if (d > 0 && d < SEUIL_DETECTION_OBSTACLE) {
+        afficherLCD("EVITEMENT O1", "Gauche");
+        arreter(); delay(200);
+        etat = EVITEMENT_O1;
+      } else {
+        suiveurVFF(pos);
+        delay(20);
+      }
+      break;
+    }
+
+    case EVITEMENT_O1:
+      esquiveObstacleGauche();
+      obstaclesTraites = 1;
+      resetNoir();
+      afficherLCD("SUIVI L3", "Vers obstacle 2");
+      etat = SUIVI_L3;
+      break;
+
+    case SUIVI_L3:
+    {
+      float d = mesurerDistance();
+      if (d > 0 && d < SEUIL_DETECTION_OBSTACLE) {
+        afficherLCD("EVITEMENT O2", "Droite");
+        arreter(); delay(200);
+        etat = EVITEMENT_O2;
+      } else {
+        suiveurVFF(pos);
+        delay(20);
+      }
+      break;
+    }
+
+    case EVITEMENT_O2:
+      esquiveObstacleDroite();
+      obstaclesTraites = 2;
+      SEUIL_DETECTION_OBSTACLE = 2;
+      resetNoir();
+      afficherLCD("SUIVI RAMPE", "Vers panneau");
+      etat = SUIVI_RAMPE;
+      break;
+
+    case SUIVI_RAMPE:
+    {
+      float d = mesurerDistance();
+      if (d > 0 && d <= 3.0) {
+        afficherLCD("DETECTION", "Couleur...");
+        arreter();
+        etat = DETECTION_COULEUR;
+      } else {
+        suiveurVFF(pos);
+        delay(20);
+      }
+      break;
+    }
+
+    case DETECTION_COULEUR:
+      lireCouleur();
+      afficherLCD("Couleur :", nomCouleur);
+      etat = AFFICHAGE_LEDS;
+      break;
+
+    case AFFICHAGE_LEDS:
+      arreter();
+      afficherLCD("LEDS", nomCouleur);
+      afficherRuban(couleurDetectee);
+      afficherLCD("DEMI-TOUR", "En cours...");
+      etat = DEMI_TOUR;
+      break;
+
+    case DEMI_TOUR:
+      faireDemiTour();
+      resetNoir();
+      afficherLCD("RETOUR L5", "Vers arrivee");
+      etat = SUIVI_RETOUR;
+      break;
+
+    case SUIVI_RETOUR:
+      suiveurRetour(pos);
+      delay(20);
+      break;
+
+    case FIN_PARCOURS:
+    {
+      arreter();
+      float distPanier = mesurerDistance();
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Distance panier:");
+      lcd.setCursor(0, 1);
+      if (distPanier >= 400) {
+        lcd.print("Non detecte");
+      } else {
+        lcd.print(distPanier, 1);
+        lcd.print(" cm");
+      }
+      activerMoteurFin();
+      while (true) {}
+      break;
+    }
+  }
+}
