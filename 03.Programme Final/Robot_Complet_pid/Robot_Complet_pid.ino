@@ -64,6 +64,7 @@ Adafruit_NeoPixel strip(NB_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 // ============================================================
 #define MOTEUR_A 0x66
 #define MOTEUR_B 0x68
+#define MOTEUR_C 0x65
 #define ARRET    0x00
 #define AVANT    0x01
 #define ARRIERE  0x02
@@ -161,7 +162,7 @@ void recupererLigne() {
   else avancer(20);
 }
 void activerMoteurFin() {
-  piloterMoteur(0x65, ARRIERE, 63);
+  piloterMoteur(MOTEUR_C, ARRIERE, 63);
 }
 
 // ============================================================
@@ -171,7 +172,7 @@ void activerMoteurFin() {
 // ============================================================
 bool tunnelFait    = false;
 bool tunnelDetecte = false;
-const unsigned long TEMPS_AVANT_TUNNEL = 1500;
+const unsigned long TEMPS_AVANT_TUNNEL = 2500;
 
 void suiveurL1(uint8_t pos) {
   switch (pos) {
